@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# pop-updater — daily system + app update for Pop!_OS
+# Runs as root via systemd. Do not use sudo here.
+
+set -uo pipefail
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+START_TIME=$(date +%s)
+SUMMARY=""
+
+step() { echo -e "\n${CYAN}==> $1${NC}"; }
+ok()   { echo -e "${GREEN}[OK]${NC} $1"; }
+warn() { echo -e "${YELLOW}[SKIP]${NC} $1"; }
+
+append() { SUMMARY="${SUMMARY}\n$1"; }
+
+echo -e "${GREEN}"
+echo "  ╔══════════════════════════════════════╗"
+echo "  ║   pop-updater — $(date '+%Y-%m-%d %H:%M') WIB  ║"
+echo "  ╚══════════════════════════════════════╝"
+echo -e "${NC}"
+
+# ── APT ──────────────────────────────────────────────────────────────────────
+step "APT — system packages"
+if command -v apt &>/dev/null; then
+    apt update -qq 2>/dev/null
+
+    UPGRADABLE=$(apt list --upgradable 2>/dev/null | grep -v "Listing..." | awk -F'[/ ]' '{print $1 "||" $3}')
+    APT_LINES=""
+    APT_COUNT=0
+
+    if [[ -n "$UPGRADABLE" ]]; then
+        while IFS='||' read -r pkg new_ver; do
+            OLD_VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo "?")
+            APT_LINES="${APT_LINES}  • ${pkg}: ${OLD_VER} → ${new_ver}\n"
+            ((APT_COUNT++)) || true
+        done <<< "$UPGRADABLE"
+    fi
+
+    apt upgrade -y -qq 2>/dev/null && apt autoremove -y --purge -qq 2>/dev/null && apt autoclean -q 2>/dev/null
+    ok "APT done"
+
+    if [[ $APT_COUNT -gt 0 ]]; then
+        append "📦 *APT* (${APT_COUNT} updated)"
+        append "$APT_LINES"
+    else
+        append "📦 *APT* — nothing to update"
+    fi
+else
+    warn "apt not found"
+    append "📦 *APT* — not found"
+fi
+
+# ── Pop!_OS recovery ──────────────────────────────────────────────────────────
+step "Pop!_OS — recovery"
+if command -v pop-upgrade &>/dev/null; then
+    pop-upgrade recovery upgrade from-release 2>/dev/null || true
+    ok "pop-upgrade checked"
+fi
+
+# ── Firmware (fwupd) ─────────────────────────────────────────────────────────
+step "Firmware — fwupdmgr"
+FW_RESULT="no updates available"
+if command -v fwupdmgr &>/dev/null; then
+    fwupdmgr refresh --force 2>/dev/null || true
+    FW_OUT=$(fwupdmgr get-updates 2>&1 || true)
+    if echo "$FW_OUT" | grep -qi "no devices\|no updates\|nothing"; then
+        FW_RESULT="no updates available"
+    else
+        fwupdmgr update -y 2>/dev/null || true
+        FW_RESULT="updated"
+    fi
+    ok "firmware checked"
+else
+    FW_RESULT="fwupdmgr not found"
+fi
+append "🔧 *Firmware* — ${FW_RESULT}"
+
+# ── Flatpak ───────────────────────────────────────────────────────────────────
+step "Flatpak — apps"
+if command -v flatpak &>/dev/null; then
+    FP_BEFORE=$(flatpak remote-ls --updates 2>/dev/null | awk '{print $1 "||" $3}' || true)
+    FP_LINES=""
+    FP_COUNT=0
+
+    if [[ -n "$FP_BEFORE" ]]; then
+        while IFS='||' read -r app new_ver; do
+            OLD_VER=$(flatpak info "$app" 2>/dev/null | awk '/Version:/{print $2}' || echo "?")
+            FP_LINES="${FP_LINES}  • ${app}: ${OLD_VER} → ${new_ver}\n"
+            ((FP_COUNT++)) || true
+        done <<< "$FP_BEFORE"
+    fi
+
+    flatpak update -y 2>/dev/null
+    flatpak uninstall --unused -y 2>/dev/null || true
+    ok "Flatpak done"
+
+    if [[ $FP_COUNT -gt 0 ]]; then
+        append "📱 *Flatpak* (${FP_COUNT} updated)"
+        append "$FP_LINES"
+    else
+        append "📱 *Flatpak* — nothing to update"
+    fi
+else
+    warn "flatpak not found"
+    append "📱 *Flatpak* — not found"
+fi
+
+# ── pip ───────────────────────────────────────────────────────────────────────
+step "pip — Python packages"
+if command -v pip3 &>/dev/null; then
+    PIP_OUTDATED=$(pip3 list --outdated --format=columns 2>/dev/null | tail -n +3)
+    PIP_LINES=""
+    PIP_COUNT=0
+
+    if [[ -n "$PIP_OUTDATED" ]]; then
+        while read -r pkg cur_ver latest_ver _; do
+            PIP_LINES="${PIP_LINES}  • ${pkg}: ${cur_ver} → ${latest_ver}\n"
+            ((PIP_COUNT++)) || true
+        done <<< "$PIP_OUTDATED"
+        echo "$PIP_OUTDATED" | awk '{print $1}' | xargs pip3 install --upgrade 2>/dev/null && ok "pip done" || echo -e "${RED}[FAIL]${NC} pip had errors"
+    else
+        ok "pip — nothing to update"
+    fi
+
+    if [[ $PIP_COUNT -gt 0 ]]; then
+        append "🐍 *pip* (${PIP_COUNT} updated)"
+        append "$PIP_LINES"
+    else
+        append "🐍 *pip* — nothing to update"
+    fi
+else
+    warn "pip3 not found"
+    append "🐍 *pip* — not found"
+fi
+
+# ── npm global ────────────────────────────────────────────────────────────────
+step "npm — global packages"
+if command -v npm &>/dev/null; then
+    NPM_OUTDATED=$(npm outdated -g --json 2>/dev/null || echo "{}")
+    NPM_LINES=""
+    NPM_COUNT=0
+
+    if [[ "$NPM_OUTDATED" != "{}" && -n "$NPM_OUTDATED" ]]; then
+        while IFS= read -r line; do
+            pkg=$(echo "$line" | awk -F'"' '{print $2}')
+            cur=$(echo "$NPM_OUTDATED" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$pkg',{}).get('current','?'))" 2>/dev/null || echo "?")
+            lat=$(echo "$NPM_OUTDATED" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$pkg',{}).get('latest','?'))" 2>/dev/null || echo "?")
+            NPM_LINES="${NPM_LINES}  • ${pkg}: ${cur} → ${lat}\n"
+            ((NPM_COUNT++)) || true
+        done < <(echo "$NPM_OUTDATED" | python3 -c "import sys,json; [print(k) for k in json.load(sys.stdin).keys()]" 2>/dev/null)
+        npm update -g 2>/dev/null && ok "npm done"
+    else
+        ok "npm — nothing to update"
+    fi
+
+    if [[ $NPM_COUNT -gt 0 ]]; then
+        append "📦 *npm* (${NPM_COUNT} updated)"
+        append "$NPM_LINES"
+    else
+        append "📦 *npm* — nothing to update"
+    fi
+else
+    warn "npm not found"
+    append "📦 *npm* — not found"
+fi
+
+# ── Duration ──────────────────────────────────────────────────────────────────
+END_TIME=$(date +%s)
+ELAPSED=$(( END_TIME - START_TIME ))
+DURATION="${ELAPSED}s"
+if (( ELAPSED >= 60 )); then
+    DURATION="$((ELAPSED/60))m $((ELAPSED%60))s"
+fi
+
+# ── Telegram notification ────────────────────────────────────────────────────
+if [[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]]; then
+    HEADER="🖥️ *pop-updater* — $(date '+%Y-%m-%d %H:%M') WIB"
+    FOOTER="⏱️ Duration: ${DURATION}"
+    MESSAGE="${HEADER}\n\n${SUMMARY}\n${FOOTER}"
+
+    curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=${TG_CHAT_ID}" \
+        -d "parse_mode=Markdown" \
+        --data-urlencode "text=$(printf '%b' "$MESSAGE")" \
+        -o /dev/null
+    ok "Telegram notification sent"
+else
+    warn "TG_BOT_TOKEN or TG_CHAT_ID not set — skipping notification"
+fi
+
+# ── Done ──────────────────────────────────────────────────────────────────────
+echo -e "\n${GREEN}══════════════════════════════════════════${NC}"
+echo -e "${GREEN}  All done! (${DURATION})  $(date '+%H:%M')${NC}"
+echo -e "${GREEN}══════════════════════════════════════════${NC}\n"
