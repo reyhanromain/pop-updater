@@ -46,14 +46,14 @@ if command -v apt &>/dev/null; then
     ok "APT done"
 
     if [[ $APT_COUNT -gt 0 ]]; then
-        append "📦 *APT* (${APT_COUNT} updated)"
+        append "📦 <b>APT</b> (${APT_COUNT} updated)"
         append "$APT_LINES"
     else
-        append "📦 *APT* — nothing to update"
+        append "📦 <b>APT</b> — nothing to update"
     fi
 else
     warn "apt not found"
-    append "📦 *APT* — not found"
+    append "📦 <b>APT</b> — not found"
 fi
 
 # ── Pop!_OS recovery ──────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ if command -v fwupdmgr &>/dev/null; then
 else
     FW_RESULT="fwupdmgr not found"
 fi
-append "🔧 *Firmware* — ${FW_RESULT}"
+append "🔧 <b>Firmware</b> — ${FW_RESULT}"
 
 # ── Flatpak ───────────────────────────────────────────────────────────────────
 step "Flatpak — apps"
@@ -101,20 +101,23 @@ if command -v flatpak &>/dev/null; then
     ok "Flatpak done"
 
     if [[ $FP_COUNT -gt 0 ]]; then
-        append "📱 *Flatpak* (${FP_COUNT} updated)"
+        append "📱 <b>Flatpak</b> (${FP_COUNT} updated)"
         append "$FP_LINES"
     else
-        append "📱 *Flatpak* — nothing to update"
+        append "📱 <b>Flatpak</b> — nothing to update"
     fi
 else
     warn "flatpak not found"
-    append "📱 *Flatpak* — not found"
+    append "📱 <b>Flatpak</b> — not found"
 fi
 
 # ── pip ───────────────────────────────────────────────────────────────────────
+# Runs as the actual user (wknd) since pip packages are user-scoped.
+# Ubuntu 24.04 blocks system-wide pip installs (PEP 668).
 step "pip — Python packages"
-if command -v pip3 &>/dev/null; then
-    PIP_OUTDATED=$(pip3 list --outdated --format=columns 2>/dev/null | tail -n +3)
+ACTUAL_USER=$(logname 2>/dev/null || echo "wknd")
+if sudo -u "$ACTUAL_USER" pip3 list --outdated &>/dev/null 2>&1; then
+    PIP_OUTDATED=$(sudo -u "$ACTUAL_USER" pip3 list --outdated --format=columns 2>/dev/null | tail -n +3)
     PIP_LINES=""
     PIP_COUNT=0
 
@@ -123,20 +126,20 @@ if command -v pip3 &>/dev/null; then
             PIP_LINES="${PIP_LINES}  • ${pkg}: ${cur_ver} → ${latest_ver}\n"
             ((PIP_COUNT++)) || true
         done <<< "$PIP_OUTDATED"
-        echo "$PIP_OUTDATED" | awk '{print $1}' | xargs pip3 install --upgrade 2>/dev/null && ok "pip done" || echo -e "${RED}[FAIL]${NC} pip had errors"
+        echo "$PIP_OUTDATED" | awk '{print $1}' | xargs sudo -u "$ACTUAL_USER" pip3 install --upgrade --user 2>&1 && ok "pip done" || echo -e "${RED}[FAIL]${NC} pip had errors"
     else
         ok "pip — nothing to update"
     fi
 
     if [[ $PIP_COUNT -gt 0 ]]; then
-        append "🐍 *pip* (${PIP_COUNT} updated)"
+        append "🐍 <b>pip</b> (${PIP_COUNT} updated)"
         append "$PIP_LINES"
     else
-        append "🐍 *pip* — nothing to update"
+        append "🐍 <b>pip</b> — nothing to update"
     fi
 else
-    warn "pip3 not found"
-    append "🐍 *pip* — not found"
+    warn "pip3 not available for user ${ACTUAL_USER}"
+    append "🐍 <b>pip</b> — skipped"
 fi
 
 # ── npm global ────────────────────────────────────────────────────────────────
@@ -160,14 +163,14 @@ if command -v npm &>/dev/null; then
     fi
 
     if [[ $NPM_COUNT -gt 0 ]]; then
-        append "📦 *npm* (${NPM_COUNT} updated)"
+        append "📦 <b>npm</b> (${NPM_COUNT} updated)"
         append "$NPM_LINES"
     else
-        append "📦 *npm* — nothing to update"
+        append "📦 <b>npm</b> — nothing to update"
     fi
 else
     warn "npm not found"
-    append "📦 *npm* — not found"
+    append "📦 <b>npm</b> — not found"
 fi
 
 # ── Duration ──────────────────────────────────────────────────────────────────
@@ -180,16 +183,22 @@ fi
 
 # ── Telegram notification ────────────────────────────────────────────────────
 if [[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]]; then
-    HEADER="🖥️ *pop-updater* — $(date '+%Y-%m-%d %H:%M') WIB"
+    HEADER="🖥️ <b>pop-updater</b> — $(date '+%Y-%m-%d %H:%M') WIB"
     FOOTER="⏱️ Duration: ${DURATION}"
     MESSAGE="${HEADER}\n\n${SUMMARY}\n${FOOTER}"
 
-    curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=${TG_CHAT_ID}" \
-        -d "parse_mode=Markdown" \
-        --data-urlencode "text=$(printf '%b' "$MESSAGE")" \
-        -o /dev/null
-    ok "Telegram notification sent"
+    TG_RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n \
+            --arg chat_id "${TG_CHAT_ID}" \
+            --arg text "$(printf '%b' "$MESSAGE")" \
+            '{chat_id: $chat_id, parse_mode: "HTML", text: $text}')")
+
+    if echo "$TG_RESPONSE" | jq -e '.ok == true' &>/dev/null; then
+        ok "Telegram notification sent"
+    else
+        echo -e "${RED}[FAIL]${NC} Telegram error: $(echo "$TG_RESPONSE" | jq -r '.description // "unknown"')"
+    fi
 else
     warn "TG_BOT_TOKEN or TG_CHAT_ID not set — skipping notification"
 fi
