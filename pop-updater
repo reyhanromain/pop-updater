@@ -12,12 +12,20 @@ NC='\033[0m'
 
 START_TIME=$(date +%s)
 SUMMARY=""
+TAR_APPS_CONF="/etc/pop-updater/tar-apps.conf"
+TAR_APPS_DIR="/usr/local/lib/pop-updater/tar-app-scripts"
 
 step() { echo -e "\n${CYAN}==> $1${NC}"; }
 ok()   { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[SKIP]${NC} $1"; }
 
 append() { SUMMARY="${SUMMARY}\n$1"; }
+
+kv_get() {
+    local line="$1"
+    local key="$2"
+    sed -n "s/.*\\b${key}=\\([^[:space:]]*\\).*/\\1/p" <<< "$line"
+}
 
 echo -e "${GREEN}"
 echo "  ╔══════════════════════════════════════╗"
@@ -174,6 +182,95 @@ if command -v npm &>/dev/null; then
 else
     warn "npm not found"
     append "📦 <b>npm</b> — not found"
+fi
+
+# ── Tar apps ──────────────────────────────────────────────────────────────────
+step "Tar apps — standalone tarball updaters"
+TAR_UPDATED_LINES=""
+TAR_FAILED_LINES=""
+TAR_SKIPPED_LINES=""
+TAR_UPDATED_COUNT=0
+TAR_CURRENT_COUNT=0
+TAR_FAILED_COUNT=0
+TAR_SKIPPED_COUNT=0
+TAR_ENABLED_COUNT=0
+
+if [[ -f "$TAR_APPS_CONF" ]]; then
+    while IFS= read -r config_line || [[ -n "$config_line" ]]; do
+        config_line="${config_line%%#*}"
+        config_line="${config_line//[[:space:]]/}"
+        [[ -z "$config_line" || "$config_line" != *=* ]] && continue
+
+        app_key="${config_line%%=*}"
+        app_state="${config_line#*=}"
+        [[ "$app_state" != "on" ]] && continue
+        ((TAR_ENABLED_COUNT++)) || true
+
+        app_script="$TAR_APPS_DIR/$app_key"
+        if [[ ! -x "$app_script" ]]; then
+            warn "tar app ${app_key} script not found"
+            TAR_SKIPPED_LINES="${TAR_SKIPPED_LINES}  • ${app_key}: script not found\n"
+            ((TAR_SKIPPED_COUNT++)) || true
+            continue
+        fi
+
+        echo "Running tar app: ${app_key}"
+        TAR_OUT="$("$app_script" 2>&1)"
+        TAR_RC=$?
+        printf '%s\n' "$TAR_OUT"
+
+        RESULT_LINE=$(printf '%s\n' "$TAR_OUT" | grep '^RESULT ' | tail -n 1 || true)
+        if [[ -z "$RESULT_LINE" ]]; then
+            TAR_FAILED_LINES="${TAR_FAILED_LINES}  • ${app_key}: no result line (exit ${TAR_RC})\n"
+            ((TAR_FAILED_COUNT++)) || true
+            continue
+        fi
+
+        result_app=$(kv_get "$RESULT_LINE" "app")
+        result_status=$(kv_get "$RESULT_LINE" "status")
+        result_old=$(kv_get "$RESULT_LINE" "old")
+        result_new=$(kv_get "$RESULT_LINE" "new")
+        result_message=$(kv_get "$RESULT_LINE" "message")
+        result_app="${result_app:-$app_key}"
+        result_message="${result_message//_/ }"
+
+        case "$result_status" in
+            updated)
+                TAR_UPDATED_LINES="${TAR_UPDATED_LINES}  • ${result_app}: ${result_old:-?} → ${result_new:-?}\n"
+                ((TAR_UPDATED_COUNT++)) || true
+                ;;
+            current)
+                ((TAR_CURRENT_COUNT++)) || true
+                ;;
+            skipped)
+                TAR_SKIPPED_LINES="${TAR_SKIPPED_LINES}  • ${result_app}: ${result_message:-skipped}\n"
+                ((TAR_SKIPPED_COUNT++)) || true
+                ;;
+            failed|*)
+                TAR_FAILED_LINES="${TAR_FAILED_LINES}  • ${result_app}: ${result_message:-failed}\n"
+                ((TAR_FAILED_COUNT++)) || true
+                ;;
+        esac
+    done < "$TAR_APPS_CONF"
+
+    if [[ $TAR_ENABLED_COUNT -eq 0 ]]; then
+        append "📦 <b>Tar apps</b> — no apps enabled"
+    elif [[ $TAR_UPDATED_COUNT -gt 0 ]]; then
+        append "📦 <b>Tar apps</b> (${TAR_UPDATED_COUNT} updated)"
+        append "$TAR_UPDATED_LINES"
+        [[ $TAR_FAILED_COUNT -gt 0 ]] && append "$TAR_FAILED_LINES"
+        [[ $TAR_SKIPPED_COUNT -gt 0 ]] && append "$TAR_SKIPPED_LINES"
+    elif [[ $TAR_FAILED_COUNT -gt 0 || $TAR_SKIPPED_COUNT -gt 0 ]]; then
+        append "📦 <b>Tar apps</b> — issues"
+        [[ $TAR_FAILED_COUNT -gt 0 ]] && append "$TAR_FAILED_LINES"
+        [[ $TAR_SKIPPED_COUNT -gt 0 ]] && append "$TAR_SKIPPED_LINES"
+    else
+        append "📦 <b>Tar apps</b> — all up to date"
+    fi
+    ok "Tar apps done"
+else
+    warn "tar apps config not found"
+    append "📦 <b>Tar apps</b> — config not found"
 fi
 
 # ── Duration ──────────────────────────────────────────────────────────────────

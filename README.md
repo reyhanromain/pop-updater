@@ -8,6 +8,7 @@ Automated daily system update for Pop!_OS with Telegram notification.
 - **pip** — Python packages
 - **npm** — global Node packages
 - **fwupdmgr** — firmware
+- **Tar apps** — standalone tarball apps such as Postman
 
 ## Telegram summary
 After each run, a message is sent with per-package version diffs:
@@ -22,6 +23,7 @@ After each run, a message is sent with per-package version diffs:
 📱 Flatpak — nothing to update
 🐍 pip — nothing to update
 📦 npm — nothing to update
+📦 Tar apps — all up to date
 🔧 Firmware — no updates available
 
 ⏱️ Duration: 1m 22s
@@ -37,8 +39,38 @@ sudo ./install.sh
 
 `install.sh` will prompt for your Telegram bot token and chat ID, then:
 - Deploy the script to `/usr/local/bin/pop-updater`
+- Deploy tar app scripts to `/usr/local/lib/pop-updater/tar-app-scripts/`
 - Store credentials in `/etc/pop-updater/secrets.conf` (root-only)
+- Create `/etc/pop-updater/tar-apps.conf` if missing
 - Install and enable the systemd timer (runs daily at 07:30 WIB)
+
+## Tar apps
+
+Tar apps are apps distributed as standalone tarballs instead of APT, Flatpak, npm, or pip packages.
+Each tar app has its own script in `tar-app-scripts/`, and the script name is the app key.
+
+Enable or disable tar apps in:
+
+```bash
+sudoedit /etc/pop-updater/tar-apps.conf
+```
+
+Example:
+
+```bash
+postman=on
+```
+
+Supported values:
+- `on` — run the matching script
+- `off` — skip it
+
+Postman is managed globally:
+- App: `/opt/Postman`
+- Tar cache: `/var/cache/pop-updater/tar/postman/postman-linux-x64.tar.gz`
+- Metadata: `/var/lib/pop-updater/tar/postman/`
+- Command: `/usr/local/bin/postman`
+- Launcher: `/usr/share/applications/postman.desktop`
 
 ## Manual run
 

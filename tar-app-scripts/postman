@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Postman tarball updater for pop-updater.
+
+set -uo pipefail
+
+APP_NAME="Postman"
+DOWNLOAD_URL="https://dl.pstmn.io/download/latest/linux_64"
+INSTALL_PARENT="/opt"
+INSTALL_DIR="$INSTALL_PARENT/Postman"
+CACHE_DIR="/var/cache/pop-updater/tar/postman"
+STATE_DIR="/var/lib/pop-updater/tar/postman"
+TAR_PATH="$CACHE_DIR/postman-linux-x64.tar.gz"
+REMOTE_META="$STATE_DIR/latest.headers"
+CACHED_TAR_META="$STATE_DIR/cached-tar.headers"
+BIN_LINK="/usr/local/bin/postman"
+DESKTOP_FILE="/usr/share/applications/postman.desktop"
+
+result() {
+    local status="$1"
+    local old="${2:-}"
+    local new="${3:-}"
+    local message="${4:-}"
+    echo "RESULT app=${APP_NAME} status=${status} old=${old:-?} new=${new:-?} message=${message:-}"
+}
+
+fail() {
+    local message="${1:-failed}"
+    echo "ERROR: ${message}" >&2
+    result "failed" "$(installed_version 2>/dev/null || echo "?")" "?" "${message// /_}"
+    exit 0
+}
+
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || fail "missing command $1"
+}
+
+metadata_value() {
+    local key="$1"
+    local file="$2"
+    awk -v k="$key" 'BEGIN { IGNORECASE=1 } $0 ~ "^" k ":" {
+        sub("^[^:]+:[[:space:]]*", "")
+        sub("\r$", "")
+        print
+        exit
+    }' "$file"
+}
+
+version_from_tar() {
+    tar -xOf "$1" Postman/app/resources/app/package.json \
+        | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
+}
+
+installed_version() {
+    local package_json="$INSTALL_DIR/app/resources/app/package.json"
+    if [[ -f "$package_json" ]]; then
+        sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$package_json"
+    else
+        echo "not_installed"
+    fi
+}
+
+fetch_remote_metadata() {
+    local tmp
+    tmp="$(mktemp "$STATE_DIR/latest.headers.XXXXXX")" || fail "metadata temp failed"
+    if ! curl -fsSI "$DOWNLOAD_URL" > "$tmp"; then
+        rm -f "$tmp"
+        fail "metadata fetch failed"
+    fi
+    mv "$tmp" "$REMOTE_META" || fail "metadata write failed"
+}
+
+remote_size() {
+    metadata_value "content-length" "$REMOTE_META"
+}
+
+remote_etag() {
+    metadata_value "etag" "$REMOTE_META"
+}
+
+cached_etag() {
+    [[ -f "$CACHED_TAR_META" ]] && metadata_value "etag" "$CACHED_TAR_META" || echo ""
+}
+
+local_size() {
+    [[ -f "$TAR_PATH" ]] && stat -c '%s' "$TAR_PATH" || echo ""
+}
+
+write_launchers() {
+    ln -sfn "$INSTALL_DIR/Postman" "$BIN_LINK" || fail "binary link failed"
+    cat > "$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Postman
+Comment=API development environment
+Exec=$BIN_LINK %U
+Icon=$INSTALL_DIR/app/resources/app/assets/icon.png
+Terminal=false
+Categories=Development;
+StartupWMClass=Postman
+MimeType=x-scheme-handler/postman;
+EOF
+    chmod 0644 "$DESKTOP_FILE" || fail "desktop chmod failed"
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database /usr/share/applications || true
+    fi
+}
+
+download_latest_tar() {
+    local tmp
+    tmp="$(mktemp "$STATE_DIR/postman-linux-x64.tar.gz.XXXXXX")" || fail "download temp failed"
+    echo "Downloading ${APP_NAME}..."
+    if ! curl -fL "$DOWNLOAD_URL" -o "$tmp"; then
+        rm -f "$tmp"
+        fail "download failed"
+    fi
+    if ! tar -tzf "$tmp" "Postman/app/resources/app/package.json" >/dev/null; then
+        rm -f "$tmp"
+        fail "archive validation failed"
+    fi
+    install -m 0644 "$tmp" "$TAR_PATH" || fail "cache write failed"
+    rm -f "$tmp"
+    cp "$REMOTE_META" "$CACHED_TAR_META" || fail "cached metadata write failed"
+}
+
+install_from_tar() {
+    local old_version new_version staging backup
+    old_version="$(installed_version)"
+    new_version="$(version_from_tar "$TAR_PATH")"
+    [[ -n "$new_version" ]] || fail "version read failed"
+
+    staging="$(mktemp -d "$INSTALL_PARENT/.Postman-update.XXXXXX")" || fail "staging create failed"
+    backup="$INSTALL_PARENT/Postman.backup.$(date +%Y%m%d-%H%M%S)"
+
+    echo "Extracting ${APP_NAME} ${new_version}..."
+    if ! tar -xzf "$TAR_PATH" -C "$staging"; then
+        rm -rf "$staging"
+        fail "extract failed"
+    fi
+    if [[ ! -x "$staging/Postman/app/Postman" ]]; then
+        rm -rf "$staging"
+        fail "executable missing"
+    fi
+
+    if [[ -e "$INSTALL_DIR" ]]; then
+        mv "$INSTALL_DIR" "$backup" || {
+            rm -rf "$staging"
+            fail "backup failed"
+        }
+    fi
+
+    if ! mv "$staging/Postman" "$INSTALL_DIR"; then
+        [[ -e "$backup" && ! -e "$INSTALL_DIR" ]] && mv "$backup" "$INSTALL_DIR"
+        rm -rf "$staging"
+        fail "install move failed"
+    fi
+
+    rmdir "$staging" 2>/dev/null || true
+    chmod -R a+rX "$INSTALL_DIR" || fail "permission fix failed"
+    write_launchers
+    echo "Installed ${APP_NAME}: ${old_version} -> ${new_version}"
+    [[ -e "$backup" ]] && echo "Previous install kept at: $backup"
+    result "updated" "$old_version" "$new_version" ""
+    exit 0
+}
+
+main() {
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        result "skipped" "?" "?" "must_run_as_root"
+        exit 0
+    fi
+
+    need_cmd curl
+    need_cmd tar
+    need_cmd stat
+    need_cmd sed
+    need_cmd awk
+    need_cmd install
+
+    mkdir -p "$CACHE_DIR" "$STATE_DIR" "$INSTALL_PARENT" /usr/local/bin /usr/share/applications \
+        || fail "directory setup failed"
+
+    echo "Checking ${APP_NAME} tarball..."
+    fetch_remote_metadata
+
+    local r_size r_etag c_etag l_size current_version tar_version
+    r_size="$(remote_size)"
+    r_etag="$(remote_etag)"
+    c_etag="$(cached_etag)"
+    l_size="$(local_size)"
+    current_version="$(installed_version)"
+
+    [[ -n "$r_size" ]] || fail "remote size missing"
+
+    echo "Installed version: ${current_version}"
+    echo "Remote size: ${r_size} bytes"
+    [[ -n "$r_etag" ]] && echo "Remote ETag: ${r_etag}"
+
+    if [[ ! -f "$TAR_PATH" ]]; then
+        echo "Cached tarball missing."
+        download_latest_tar
+        install_from_tar
+    fi
+
+    tar_version="$(version_from_tar "$TAR_PATH" 2>/dev/null || true)"
+    [[ -n "$tar_version" ]] || fail "cached archive invalid"
+
+    echo "Cached tarball size: ${l_size} bytes"
+    echo "Cached tarball version: ${tar_version}"
+    [[ -n "$c_etag" ]] && echo "Cached ETag: ${c_etag}"
+
+    if [[ "$current_version" == "$tar_version" && "$l_size" == "$r_size" ]] \
+        && { [[ -z "$c_etag" ]] || [[ "$c_etag" == "$r_etag" ]]; }; then
+        cp "$REMOTE_META" "$CACHED_TAR_META" || fail "cached metadata write failed"
+        write_launchers
+        echo "${APP_NAME} is current."
+        result "current" "$current_version" "$current_version" "up_to_date"
+        exit 0
+    fi
+
+    echo "Update detected or local install/cache mismatch."
+    rm -f "$TAR_PATH" || fail "cache remove failed"
+    download_latest_tar
+    install_from_tar
+}
+
+main "$@"
