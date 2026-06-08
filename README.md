@@ -30,7 +30,7 @@ After each run, a message is sent with per-package version diffs:
 ## Install
 
 ```bash
-git clone https://github.com/youruser/pop-updater ~/github/pop-updater
+git clone https://github.com/reyhanromain/pop-updater ~/github/pop-updater
 cd ~/github/pop-updater
 sudo ./install.sh
 ```
