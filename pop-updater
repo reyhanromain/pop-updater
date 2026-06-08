@@ -112,12 +112,13 @@ else
 fi
 
 # ── pip ───────────────────────────────────────────────────────────────────────
-# Runs as the actual user (wknd) since pip packages are user-scoped.
-# Ubuntu 24.04 blocks system-wide pip installs (PEP 668).
-step "pip — Python packages"
+# Only touches packages the user installed themselves (--user scope).
+# System/distro pip packages are managed by apt and protected by PEP 668;
+# upgrading them via pip would break the OS, so we deliberately skip them.
+step "pip — Python packages (user-installed only)"
 ACTUAL_USER=$(logname 2>/dev/null || echo "wknd")
-if sudo -u "$ACTUAL_USER" pip3 list --outdated &>/dev/null 2>&1; then
-    PIP_OUTDATED=$(sudo -u "$ACTUAL_USER" pip3 list --outdated --format=columns 2>/dev/null | tail -n +3)
+if id "$ACTUAL_USER" &>/dev/null && command -v pip3 &>/dev/null; then
+    PIP_OUTDATED=$(sudo -u "$ACTUAL_USER" pip3 list --user --outdated --format=columns 2>/dev/null | tail -n +3)
     PIP_LINES=""
     PIP_COUNT=0
 
@@ -126,7 +127,9 @@ if sudo -u "$ACTUAL_USER" pip3 list --outdated &>/dev/null 2>&1; then
             PIP_LINES="${PIP_LINES}  • ${pkg}: ${cur_ver} → ${latest_ver}\n"
             ((PIP_COUNT++)) || true
         done <<< "$PIP_OUTDATED"
-        echo "$PIP_OUTDATED" | awk '{print $1}' | xargs sudo -u "$ACTUAL_USER" pip3 install --upgrade --user 2>&1 && ok "pip done" || echo -e "${RED}[FAIL]${NC} pip had errors"
+        # --break-system-packages is safe here: --user only writes to ~/.local,
+        # never to system site-packages.
+        echo "$PIP_OUTDATED" | awk '{print $1}' | xargs sudo -u "$ACTUAL_USER" pip3 install --user --upgrade --break-system-packages 2>&1 && ok "pip done" || echo -e "${RED}[FAIL]${NC} pip had errors"
     else
         ok "pip — nothing to update"
     fi
