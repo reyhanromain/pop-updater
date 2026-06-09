@@ -34,6 +34,8 @@ Postman paths:
 - Command: `/usr/local/bin/postman`
 - Launcher: `/usr/share/applications/postman.desktop`
 
+Keep global tar app installs root-owned after install/sync so app-native self-updaters cannot change the managed install outside `pop-updater`.
+
 ## Deploy
 ```bash
 sudo ./install.sh

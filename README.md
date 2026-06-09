@@ -72,6 +72,8 @@ Postman is managed globally:
 - Command: `/usr/local/bin/postman`
 - Launcher: `/usr/share/applications/postman.desktop`
 
+The global Postman install is kept root-owned so updates are controlled by `pop-updater`, not Postman's in-app updater.
+
 ## Manual run
 
 ```bash

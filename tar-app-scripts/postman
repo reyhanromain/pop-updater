@@ -105,6 +105,23 @@ EOF
     fi
 }
 
+harden_install() {
+    [[ -e "$INSTALL_DIR" ]] || return 0
+    chown -R root:root "$INSTALL_DIR" || fail "ownership fix failed"
+    chmod -R u+rwX,go+rX,go-w "$INSTALL_DIR" || fail "permission fix failed"
+}
+
+mark_current() {
+    local version="$1"
+    local message="${2:-up_to_date}"
+    cp "$REMOTE_META" "$CACHED_TAR_META" || fail "cached metadata write failed"
+    write_launchers
+    harden_install
+    echo "${APP_NAME} is current."
+    result "current" "$version" "$version" "$message"
+    exit 0
+}
+
 download_latest_tar() {
     local tmp
     tmp="$(mktemp "$STATE_DIR/postman-linux-x64.tar.gz.XXXXXX")" || fail "download temp failed"
@@ -155,7 +172,7 @@ install_from_tar() {
     fi
 
     rmdir "$staging" 2>/dev/null || true
-    chmod -R a+rX "$INSTALL_DIR" || fail "permission fix failed"
+    harden_install
     write_launchers
     echo "Installed ${APP_NAME}: ${old_version} -> ${new_version}"
     [[ -e "$backup" ]] && echo "Previous install kept at: $backup"
@@ -175,6 +192,8 @@ main() {
     need_cmd sed
     need_cmd awk
     need_cmd install
+    need_cmd chown
+    need_cmd chmod
 
     mkdir -p "$CACHE_DIR" "$STATE_DIR" "$INSTALL_PARENT" /usr/local/bin /usr/share/applications \
         || fail "directory setup failed"
@@ -198,6 +217,12 @@ main() {
     if [[ ! -f "$TAR_PATH" ]]; then
         echo "Cached tarball missing."
         download_latest_tar
+        tar_version="$(version_from_tar "$TAR_PATH" 2>/dev/null || true)"
+        [[ -n "$tar_version" ]] || fail "downloaded archive invalid"
+        if [[ "$current_version" == "$tar_version" ]]; then
+            echo "Installed version already matches downloaded tarball; syncing cache only."
+            mark_current "$current_version" "cache_synced"
+        fi
         install_from_tar
     fi
 
@@ -210,16 +235,18 @@ main() {
 
     if [[ "$current_version" == "$tar_version" && "$l_size" == "$r_size" ]] \
         && { [[ -z "$c_etag" ]] || [[ "$c_etag" == "$r_etag" ]]; }; then
-        cp "$REMOTE_META" "$CACHED_TAR_META" || fail "cached metadata write failed"
-        write_launchers
-        echo "${APP_NAME} is current."
-        result "current" "$current_version" "$current_version" "up_to_date"
-        exit 0
+        mark_current "$current_version" "up_to_date"
     fi
 
     echo "Update detected or local install/cache mismatch."
     rm -f "$TAR_PATH" || fail "cache remove failed"
     download_latest_tar
+    tar_version="$(version_from_tar "$TAR_PATH" 2>/dev/null || true)"
+    [[ -n "$tar_version" ]] || fail "downloaded archive invalid"
+    if [[ "$current_version" == "$tar_version" ]]; then
+        echo "Installed version already matches downloaded tarball; syncing cache only."
+        mark_current "$current_version" "cache_synced"
+    fi
     install_from_tar
 }
 
